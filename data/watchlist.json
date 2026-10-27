@@ -1,0 +1,18 @@
+{
+  "stocks": [
+    {
+      "company_name": "",
+      "symbol": "HDFCBANK"
+    },
+    {
+      "company_name": "",
+      "symbol": "LT"
+    },
+    {
+      "company_name": "",
+      "symbol": "TCS"
+    }
+  ],
+  "updated_at": "2026-10-27T18:44:14+00:00",
+  "version": 1
+}
