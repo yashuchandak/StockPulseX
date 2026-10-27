@@ -1,0 +1,4 @@
+# Use this sample in the VPS user's crontab; adjust the project path as needed.
+CRON_TZ=Asia/Kolkata
+0 12,18 * * * cd /home/aastha/projects/StockPulse && .venv/bin/python -m stockpulse.scan >> logs/scan.log 2>&1
+
