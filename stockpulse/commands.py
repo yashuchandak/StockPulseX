@@ -14,22 +14,27 @@ from .locking import exclusive_lock
 from .nse_symbols import load_symbol_directory
 from .storage import (
     add_stock,
+    add_topic,
     load_scan_state,
     load_telegram_access,
     load_telegram_state,
     load_watchlist,
     normalize_symbol,
     remove_stock,
+    remove_topic,
     utc_now_iso,
     write_json_atomic,
 )
-from .telegram_api import TelegramAPI
+from .telegram_api import TelegramAPI, TelegramAPITimeout
 
 
 HELP_TEXT = (
     "StockPulseX commands:\n"
     "/add SYMBOL — add a stock symbol (symbol only)\n"
     "/remove SYMBOL — remove a symbol\n"
+    "/follow TOPIC — follow a news topic (example: /follow gold)\n"
+    "/unfollow TOPIC — stop following a topic\n"
+    "/topics — show your followed topics\n"
     "/list — show your watchlist\n"
     "/status — show the last scan result\n"
     "/stop — stop alerts and leave (non-owner users)\n"
@@ -256,6 +261,19 @@ def handle_command(
             return "Your watchlist is empty. Add one with /add SYMBOL."
         rows = [f"NSE:{item['symbol']}" + (f" — {item['company_name']}" if item.get("company_name") else "") for item in stocks]
         return "Watchlist:\n" + "\n".join(rows)
+    if command == "/topics":
+        topics = load_watchlist(watchlist_path)["topics"]
+        return "Followed topics:\n" + ("\n".join(f"• {topic}" for topic in topics) if topics else "No topics yet. Add one with /follow gold.")
+    if command in {"/follow", "/unfollow"}:
+        if not args:
+            return f"Usage: {command} TOPIC (example: {command} defense)"
+        try:
+            changed, topic = (add_topic if command == "/follow" else remove_topic)(watchlist_path, args)
+        except ValueError as exc:
+            return str(exc)
+        if command == "/follow":
+            return f"Now following {topic}. Relevant stories from the next scan can appear in your digest." if changed else f"You're already following {topic}."
+        return f"Unfollowed {topic}." if changed else f"You weren't following {topic}."
     if command == "/status":
         state = load_scan_state(scan_state_path)
         last = state.get("last_run")
@@ -265,7 +283,7 @@ def handle_command(
             f"Last scan: {_friendly_time(last.get('completed_at'))}\n"
             f"Status: {last.get('status', 'unknown')}\n"
             f"New RSS items: {last.get('new_items', 0)}\n"
-            f"Stock matches: {last.get('matches', 0)}"
+            f"Relevant matches: {last.get('matches', 0)}"
         )
     if command == "/add":
         if not args:
@@ -430,6 +448,9 @@ def main() -> int:
         except KeyboardInterrupt:
             logging.info("Telegram command poller stopped")
             return 0
+        except TelegramAPITimeout as exc:
+            logging.warning("%s; retrying in 5 seconds", exc)
+            time.sleep(5)
         except Exception as exc:
             logging.exception("Telegram command poll failed; retrying in 5 seconds: %s", exc)
             time.sleep(5)

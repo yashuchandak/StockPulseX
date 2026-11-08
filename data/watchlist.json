@@ -2,17 +2,19 @@
   "stocks": [
     {
       "company_name": "",
-      "symbol": "HDFCBANK"
-    },
-    {
-      "company_name": "",
-      "symbol": "LT"
+      "symbol": "SUNPHARMA"
     },
     {
       "company_name": "",
       "symbol": "TCS"
     }
   ],
-  "updated_at": "2026-10-27T18:44:14+00:00",
+  "topics": [
+    "automobiles",
+    "crude oil",
+    "gold",
+    "pharma"
+  ],
+  "updated_at": "2026-11-08T14:21:02+00:00",
   "version": 1
 }

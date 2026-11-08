@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import logging
+import math
 import sys
 import time
 from collections import OrderedDict
@@ -41,26 +42,48 @@ def _display_time(value: str) -> str:
 
 
 def validate_matches(
-    articles: list[RSSItem], stocks: list[dict[str, str]], model_matches: list[dict[str, Any]]
+    articles: list[RSSItem], stocks: list[dict[str, str]], model_matches: list[dict[str, Any]],
+    topics: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    """Accept only direct, evidence-backed matches to current watchlist symbols."""
+    """Accept only direct, evidence-backed matches to subscribed stocks or topics."""
     articles_by_id = {item.item_id: item for item in articles}
     allowed_symbols = {stock["symbol"] for stock in stocks}
+    allowed_topics = {topic.casefold(): topic for topic in (topics or [])}
     valid: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for match in model_matches:
         article_id = str(match.get("article_id", ""))
         symbol = str(match.get("symbol", "")).strip().upper()
+        target_type = str(match.get("target_type", "stock"))
+        topic = str(match.get("topic", "")).strip()
         article = articles_by_id.get(article_id)
         evidence = str(match.get("evidence", "")).strip()
         summary = " ".join(str(match.get("summary", "")).split())
-        if not article or symbol not in allowed_symbols or match.get("relevance") != "direct":
+        impact_score = match.get("impact_score")
+        if isinstance(impact_score, bool) or not isinstance(impact_score, (int, float)):
+            continue
+        impact_score = float(impact_score)
+        if not math.isfinite(impact_score) or not 0.0 <= impact_score <= 1.0:
+            continue
+        if not article or match.get("relevance") != "direct":
+            continue
+        if target_type == "stock":
+            if symbol not in allowed_symbols:
+                continue
+            target = symbol
+        elif target_type == "topic":
+            target = allowed_topics.get(topic.casefold(), "")
+            if not target:
+                continue
+            symbol = ""
+            topic = target
+        else:
             continue
         if not evidence or evidence.casefold() not in f"{article.title} {article.excerpt}".casefold():
             continue
         if not summary:
             continue
-        key = (article_id, symbol)
+        key = (article_id, f"{target_type}:{target.casefold()}")
         if key in seen:
             continue
         seen.add(key)
@@ -68,6 +91,9 @@ def validate_matches(
             {
                 "article_id": article_id,
                 "symbol": symbol,
+                "topic": topic,
+                "target_type": target_type,
+                "impact_score": impact_score,
                 "relevance": "direct",
                 "evidence": evidence[:200],
                 "category": str(match.get("category", "news")).strip()[:80] or "news",
@@ -90,9 +116,13 @@ def make_digest(matches: list[dict[str, str]]) -> list[str]:
     blocks: list[str] = []
     for group in grouped.values():
         first = group[0]
-        symbols = ", ".join(html.escape(item["symbol"]) for item in group)
+        labels = ", ".join(
+            html.escape(item.get("symbol", "") if item.get("target_type", "stock") == "stock" else f"Topic: {item.get('topic', '')}")
+            + (f" (impact {item['impact_score']:.2f})" if isinstance(item.get("impact_score"), (int, float)) else "")
+            for item in group
+        )
         category = html.escape(first.get("category", "news"))
-        lines = [f"{symbols} · {category}"]
+        lines = [f"{labels} · {category}"]
         description = (first.get("description") or first.get("summary", "")).strip()
         if description:
             lines.append(html.escape(description[:1600]))
@@ -123,18 +153,77 @@ def make_digest(matches: list[dict[str, str]]) -> list[str]:
     return chunks
 
 
+def make_owner_report(
+    articles: list[RSSItem], summaries: dict[str, str], matches: list[dict[str, str]]
+) -> tuple[str, bytes]:
+    by_article: dict[str, list[dict[str, str]]] = {}
+    for match in matches:
+        by_article.setdefault(match["article_id"], []).append(match)
+    matched_ids = set(by_article)
+    topic_counts: dict[str, int] = {}
+    stock_counts: dict[str, int] = {}
+    for match in matches:
+        if match.get("target_type") == "topic":
+            label = match.get("topic", "")
+            topic_counts[label] = topic_counts.get(label, 0) + 1
+        else:
+            label = match.get("symbol", "")
+            stock_counts[label] = stock_counts.get(label, 0) + 1
+    def count_text(values: dict[str, int]) -> str:
+        return ", ".join(f"{name} {count}" for name, count in sorted(values.items(), key=lambda pair: pair[0].casefold())) or "none"
+    caption = (
+        f"StockPulseX scan complete\nArticles reviewed: {len(articles)}\n"
+        f"Stories matched: {len(matched_ids)}\nNo monitored match: {len(articles) - len(matched_ids)}\n"
+        f"Topic matches: {count_text(topic_counts)}\nStock matches: {count_text(stock_counts)}\n"
+        "Full article list and source links are in the attached report."
+    )
+    lines = ["StockPulseX — full scan report", f"Articles reviewed: {len(articles)}", ""]
+    for index, article in enumerate(articles, 1):
+        article_matches = by_article.get(article.item_id, [])
+        labels = [
+            (f"Topic: {item.get('topic', '')}" if item.get("target_type") == "topic" else item.get("symbol", ""))
+            + (f" (impact {item['impact_score']:.2f})" if isinstance(item.get("impact_score"), (int, float)) else "")
+            for item in article_matches
+        ]
+        lines.extend([
+            f"{index}. {article.title or '(untitled article)'}",
+            f"Summary: {summaries.get(article.item_id) or article.excerpt or article.title}",
+            f"Matched against: {', '.join(dict.fromkeys(labels)) if labels else 'No monitored match'}",
+            "",
+        ])
+    if not articles:
+        lines.append("No new eligible RSS articles were found in this scan.")
+    return caption, ("\n".join(lines).encode("utf-8"))
+
+
+def make_owner_matches_message(
+    articles: list[RSSItem], summaries: dict[str, str], matches: list[dict[str, str]]
+) -> str:
+    if not matches:
+        return "StockPulseX · Scan matches\nNo subscribed stock or topic matches this scan. The full report follows separately."
+    chunks = make_digest(matches)
+    message = chunks[0]
+    if len(chunks) > 1:
+        message += "\n\nAdditional matches are listed in the attached report."
+    return message
+
+
 def _flush_pending(
     state: dict[str, Any],
     state_path: Path,
     api: TelegramAPI,
     recipient_id: int,
     active_symbols: set[str],
+    active_topics: set[str] | None = None,
 ) -> None:
     pending = list(state.get("pending_messages", []))
     for digest in pending:
         matches = [
             match for match in digest.get("matches", [])
-            if isinstance(match, dict) and match.get("symbol") in active_symbols
+            if isinstance(match, dict) and (
+                (match.get("target_type", "stock") == "stock" and match.get("symbol") in active_symbols)
+                or (match.get("target_type") == "topic" and str(match.get("topic", "")).casefold() in (active_topics or set()))
+            )
         ]
         if matches:
             for text in make_digest(matches):
@@ -144,15 +233,16 @@ def _flush_pending(
 
 
 def _analyze_with_retries(
-    analyzer: Callable[..., list[dict[str, Any]]],
+    analyzer: Callable[..., Any],
     articles: list[dict[str, str]],
     stocks: list[dict[str, str]],
     *,
+    topics: list[str] | None = None,
     api_key: str,
     model: str,
     timeout_seconds: int,
     sleeper: Callable[[float], None] = time.sleep,
-) -> list[dict[str, Any]]:
+) -> Any:
     max_attempts = 10
     retry_delay_seconds = 9
     for attempt in range(1, max_attempts + 1):
@@ -160,6 +250,7 @@ def _analyze_with_retries(
             return analyzer(
                 articles,
                 stocks,
+                topics=topics or [],
                 api_key=api_key,
                 model=model,
                 timeout_seconds=timeout_seconds,
@@ -215,28 +306,32 @@ def run_scan(
                 watchlist_path = config.watchlist_path_for_user(user_id)
                 state_path = config.scan_state_path_for_user(user_id)
                 state = load_scan_state(state_path)
-                stocks = load_watchlist(watchlist_path)["stocks"]
+                watchlist = load_watchlist(watchlist_path)
+                stocks = watchlist["stocks"]
+                topics = watchlist["topics"]
                 user = {
                     "user_id": user_id,
                     "watchlist_path": watchlist_path,
                     "state_path": state_path,
                     "state": state,
                     "stocks": stocks,
+                    "topics": topics,
                     "eligible": [],
                     "matches": [],
                 }
                 users.append(user)
                 active_symbols = {stock["symbol"] for stock in stocks}
+                active_topics = {topic.casefold() for topic in topics}
                 currently_approved = set(
                     load_telegram_access(config.telegram_access_path, owner_id)["approved_user_ids"]
                 )
-                if user_id in currently_approved:
+                if user_id in currently_approved and user_id != owner_id:
                     try:
-                        _flush_pending(state, state_path, api, user_id, active_symbols)
+                        _flush_pending(state, state_path, api, user_id, active_symbols, active_topics)
                     except Exception as exc:
                         user["delivery_error"] = exc
                         logging.exception("Could not deliver pending alerts to Telegram user %s", user_id)
-                if not active_symbols:
+                if not active_symbols and not active_topics:
                     state["last_run"] = {
                         "started_at": started_at,
                         "completed_at": utc_now_iso(),
@@ -246,7 +341,7 @@ def run_scan(
                     }
                     write_json_atomic(state_path, state)
 
-            active_users = [user for user in users if user["stocks"]]
+            active_users = [user for user in users if user["stocks"] or user["topics"]]
             if not active_users:
                 return {
                     "started_at": started_at,
@@ -259,6 +354,7 @@ def run_scan(
             items = rss_fetcher(config.et_rss_url, config.http_timeout_seconds)
             article_by_id: dict[str, RSSItem] = {}
             union_stocks: dict[str, dict[str, str]] = {}
+            union_topics: dict[str, str] = {}
             for user in active_users:
                 state = user["state"]
                 seen_order = list(dict.fromkeys(state.get("seen_item_ids", [])))
@@ -286,21 +382,39 @@ def run_scan(
                     existing = union_stocks.get(stock["symbol"])
                     if existing is None or (not existing.get("company_name") and stock.get("company_name")):
                         union_stocks[stock["symbol"]] = stock
+                for topic in user["topics"]:
+                    union_topics.setdefault(topic.casefold(), topic)
 
             union_articles = list(article_by_id.values())
             union_stock_list = list(union_stocks.values())
             all_matches: list[dict[str, str]] = []
-            if union_articles:
-                model_matches = _analyze_with_retries(
+            article_summaries: dict[str, str] = {}
+            if union_articles and (union_stock_list or union_topics):
+                model_result = _analyze_with_retries(
                     analyzer,
                     [item.to_dict() for item in union_articles],
                     union_stock_list,
+                    topics=list(union_topics.values()),
                     api_key=config.gemini_api_key,
                     model=config.gemini_model,
                     timeout_seconds=config.http_timeout_seconds,
                     sleeper=sleeper,
                 )
-                all_matches = validate_matches(union_articles, union_stock_list, model_matches)
+                if isinstance(model_result, dict):
+                    model_matches = model_result.get("matches", [])
+                    for item in model_result.get("summaries", []):
+                        article_id = str(item.get("article_id", ""))
+                        summary = " ".join(str(item.get("summary", "")).split())
+                        if any(article.item_id == article_id for article in union_articles) and summary:
+                            article_summaries[article_id] = summary[:500]
+                else:
+                    model_matches = model_result
+                all_matches = validate_matches(union_articles, union_stock_list, model_matches, list(union_topics.values()))
+                logging.info(
+                    "Gemini returned %d candidate match(es); %d passed subscription and evidence checks",
+                    len(model_matches),
+                    len(all_matches),
+                )
 
             total_new_items = 0
             total_matches = 0
@@ -313,12 +427,18 @@ def run_scan(
                     stock["symbol"] for stock in load_watchlist(user["watchlist_path"])["stocks"]
                 }
                 allowed_symbols = original_symbols & current_symbols
+                original_topics = {topic.casefold() for topic in user["topics"]}
+                current_topics = {topic.casefold() for topic in load_watchlist(user["watchlist_path"])["topics"]}
+                allowed_topics = original_topics & current_topics
                 matches = [
                     match for match in all_matches
-                    if match["article_id"] in eligible_ids and match["symbol"] in allowed_symbols
+                    if match["article_id"] in eligible_ids and (
+                        (match.get("target_type", "stock") == "stock" and match.get("symbol") in allowed_symbols)
+                        or (match.get("target_type") == "topic" and match.get("topic", "").casefold() in allowed_topics)
+                    )
                 ]
                 user["matches"] = matches
-                if matches:
+                if matches and user_id != owner_id:
                     state.setdefault("pending_messages", []).append(
                         {"matches": matches, "created_at": utc_now_iso()}
                     )
@@ -348,11 +468,12 @@ def run_scan(
                 currently_approved = set(
                     load_telegram_access(config.telegram_access_path, owner_id)["approved_user_ids"]
                 )
-                if user["user_id"] not in currently_approved:
+                if user["user_id"] not in currently_approved or user["user_id"] == owner_id:
                     continue
                 current_symbols = {
                     stock["symbol"] for stock in load_watchlist(user["watchlist_path"])["stocks"]
                 }
+                current_topics = {topic.casefold() for topic in load_watchlist(user["watchlist_path"])["topics"]}
                 try:
                     _flush_pending(
                         user["state"],
@@ -360,6 +481,7 @@ def run_scan(
                         api,
                         user["user_id"],
                         current_symbols,
+                        current_topics,
                     )
                 except Exception as exc:
                     state = user["state"]
@@ -376,12 +498,26 @@ def run_scan(
             aggregate_status = (
                 "completed" if total_matches else ("no_matches" if total_new_items else "no_new_items")
             )
+            caption, report = make_owner_report(union_articles, article_summaries, all_matches)
+            try:
+                api.send_message(
+                    owner_id,
+                    make_owner_matches_message(union_articles, article_summaries, all_matches),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logging.exception("Could not send the owner combined matches message")
+            try:
+                api.send_document(owner_id, f"stockpulse-scan-{datetime.now(IST):%Y%m%d-%H%M}.txt", report, "Full scan report attached.")
+            except Exception:
+                logging.exception("Could not send the owner scan report")
             return {
                 "started_at": started_at,
                 "completed_at": utc_now_iso(),
                 "status": aggregate_status,
                 "new_items": total_new_items,
                 "matches": total_matches,
+                "owner_report_articles": len(union_articles),
             }
         except Exception as exc:
             for user in users:

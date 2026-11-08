@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from typing import Any
@@ -9,6 +10,10 @@ from typing import Any
 
 class TelegramAPIError(RuntimeError):
     pass
+
+
+class TelegramAPITimeout(TelegramAPIError):
+    """A transient timeout while waiting for Telegram's HTTP response."""
 
 
 class TelegramAPI:
@@ -27,7 +32,9 @@ class TelegramAPI:
         try:
             with urlopen(request, timeout=timeout_seconds or self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
-        except (HTTPError, URLError, TimeoutError) as exc:
+        except TimeoutError as exc:
+            raise TelegramAPITimeout(f"Telegram {method} request timed out") from exc
+        except (HTTPError, URLError) as exc:
             detail = ""
             if isinstance(exc, HTTPError):
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -45,7 +52,9 @@ class TelegramAPI:
         if offset is not None:
             payload["offset"] = offset
         # Keep the HTTP connection alive slightly longer than Telegram's long-poll wait.
-        result = self.call("getUpdates", payload, timeout_seconds=max(self.timeout_seconds, timeout + 10))
+        # Telegram holds long polls open for `timeout`; allow a small network margin
+        # without inheriting a potentially much longer timeout for other API calls.
+        result = self.call("getUpdates", payload, timeout_seconds=timeout + 10)
         return result if isinstance(result, list) else []
 
     def send_message(self, chat_id: int, text: str, parse_mode: str | None = None) -> None:
@@ -69,4 +78,35 @@ class TelegramAPI:
                 )
         assert last_error is not None
         raise last_error
+
+    def send_document(self, chat_id: int, filename: str, content: bytes, caption: str = "") -> None:
+        boundary = f"StockPulseX-{uuid.uuid4().hex}"
+        parts = [
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat_id}\r\n".encode(),
+        ]
+        if caption:
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n".encode())
+        parts.extend([
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n".encode(),
+            content,
+            f"\r\n--{boundary}--\r\n".encode(),
+        ])
+        request = Request(
+            f"{self.base_url}/sendDocument",
+            data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "StockPulse/0.1"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except TimeoutError as exc:
+            raise TelegramAPITimeout("Telegram sendDocument request timed out") from exc
+        except (HTTPError, URLError) as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500] if isinstance(exc, HTTPError) else str(exc)
+            raise TelegramAPIError(f"Telegram sendDocument request failed: {detail}") from exc
+        except json.JSONDecodeError as exc:
+            raise TelegramAPIError("Telegram sendDocument returned invalid JSON") from exc
+        if not result.get("ok"):
+            raise TelegramAPIError(f"Telegram sendDocument failed: {result.get('description', 'unknown error')}")
 

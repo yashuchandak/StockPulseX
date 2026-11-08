@@ -1,6 +1,6 @@
 # StockPulseX
 
-NSE news alerts from the Economic Times Markets RSS feed, delivered to private Telegram chats. The bot is invite-only: the configured owner approves each user from Telegram.
+NSE stock and topic-based news alerts from the Economic Times Markets RSS feed, delivered to private Telegram chats. The bot is invite-only: the configured owner approves each user from Telegram.
 
 The Telegram command poller (`python -m stockpulse.commands`) is a continuous long-polling process that stays running and replies to commands promptly. Run it under a service manager such as systemd so it starts on boot and restarts after a failure. The independent scan entry point (`python -m stockpulse.scan`) fetches the RSS feed once, asks Gemini to identify direct matches across approved users' watchlists, and sends each person only their own matches; schedule that scan with cron or a timer.
 
@@ -48,6 +48,9 @@ Schedule only `python -m stockpulse.scan` with cron or a systemd timer. Keep `py
 
 - `/add RELIANCE` (stock symbol only)
 - `/remove RELIANCE`
+- `/follow gold` (follow a news topic; multiword topics are supported)
+- `/unfollow gold`
+- `/topics` (show followed topics)
 - `/list`
 - `/status`
 - `/help`
@@ -61,13 +64,24 @@ The owner manages requests in the private bot chat:
 - `/deny ID` or `/deny @username` — deny a pending request.
 - `/revoke ID` or `/revoke @username` — remove a user's access.
 
-Approved users can use `/add`, `/remove`, `/list`, `/status`, and `/help`. Each approved user has a private watchlist, scan history, and alert delivery. The owner keeps using the existing `data/watchlist.json` and `data/scan_state.json`. The command poller stores its Telegram update offset in `data/telegram_state.json` and its access list and saved display names in `data/telegram_access.json`.
+Approved users can use `/add`, `/remove`, `/follow`, `/unfollow`, `/topics`, `/list`, `/status`, and `/help`. Each approved user has a private stock list, topic list, scan history, and alert delivery. Existing watchlist files remain compatible; topic subscriptions are stored alongside stocks in each `watchlist.json`.
+
+### News processing flow
+
+1. Each scheduled scan fetches the configured Economic Times Markets RSS feed once and keeps only unseen, eligible articles.
+2. It combines approved users' current stock symbols and followed topics into one Gemini request. The prompt asks Gemini for direct company matches and substantive topic coverage (including clear related terms such as bullion for gold or military procurement for defense), while rejecting passing mentions and unsupported claims.
+3. The program verifies that every match refers to an actual subscribed symbol or topic and that its evidence phrase appears in the RSS title or excerpt.
+4. Each user receives only matches for their own current subscriptions. Topic matches appear in the digest labeled `Topic: gold`; stock matches keep their symbol labels. No relevant match means no digest message.
+5. The scan records pending digests before Telegram delivery so a failed send can be retried on a later scan.
+6. The owner receives one combined matching-results message, followed by one `.txt` report attachment listing eligible RSS articles, one-sentence summaries, matched subscriptions, and source links. The owner does not receive a separate personal digest. The report has no “top stories” section.
+
+Topic relevance is limited to the configured RSS source and its titles/excerpts; this does not search the whole web or fetch full articles.
 
 ## Scan behavior
 
 - First successful scan considers feed items from the preceding 18 hours (configurable with `INITIAL_LOOKBACK_HOURS`) and ignores older backlog.
 - Later scans process unseen RSS items. An item ID is based on its feed GUID, canonical link, or a hash fallback.
-- Gemini receives only RSS titles/excerpts and the current watchlist. It must provide an exact evidence phrase from the item; the app suppresses uncertain matches, unknown symbols, unsupported evidence, and summaries without evidence.
+- Gemini receives only RSS titles/excerpts, subscribed symbols, and followed topics. It must provide an exact evidence phrase from the item; the app suppresses uncertain matches, unknown symbols/topics, unsupported evidence, and summaries without evidence.
 - One digest is sent per scan, with source links and short neutral summaries. No match means no digest message; `/status` still shows the scan result.
 - The app does not scrape full articles, fetch stock prices, or provide buy/sell recommendations.
 - Gemini or RSS failures leave unseen items eligible for the next scheduled scan. A pending digest is stored before Telegram delivery so the next run can retry a failed send.
@@ -78,7 +92,7 @@ Approved users can use `/add`, `/remove`, `/list`, `/status`, and `/help`. Each 
 - `data/telegram_state.json`: command polling offset.
 - `data/scan_state.json`: the owner's processed feed IDs, pending digests, and last scan status.
 - `data/telegram_access.json`: approved and pending Telegram IDs, plus names/usernames shown to the owner.
-- `data/users/<telegram_id>/watchlist.json` and `scan_state.json`: each other approved user's private data.
+- `data/users/<telegram_id>/watchlist.json` and `scan_state.json`: each other approved user's private stocks, topics, and scan data.
 - `.env`: credentials; keep it private and out of Git. Atomic JSON writes use restrictive file permissions.
 
 No database service or third-party Python packages are required.

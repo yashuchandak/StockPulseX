@@ -11,7 +11,7 @@ from typing import Any
 
 
 SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9&.\-]{0,24}$")
-WATCHLIST_DEFAULT: dict[str, Any] = {"version": 1, "stocks": [], "updated_at": None}
+WATCHLIST_DEFAULT: dict[str, Any] = {"version": 1, "stocks": [], "topics": [], "updated_at": None}
 SCAN_STATE_DEFAULT: dict[str, Any] = {
     "version": 1,
     "initialized": False,
@@ -78,6 +78,15 @@ def normalize_symbol(value: str) -> str:
     return symbol
 
 
+def normalize_topic(value: str) -> str:
+    topic = " ".join(value.split())
+    if not topic or len(topic) > 60 or any(ord(char) < 32 for char in topic):
+        raise ValueError("Use a topic between 1 and 60 characters, such as gold or defense.")
+    if topic.startswith("/") or "|" in topic:
+        raise ValueError("Enter a topic name, such as gold or defense.")
+    return topic
+
+
 def load_watchlist(path: Path) -> dict[str, Any]:
     data = read_json(path, WATCHLIST_DEFAULT)
     stocks = data.get("stocks", [])
@@ -97,7 +106,22 @@ def load_watchlist(path: Path) -> dict[str, Any]:
             continue
         seen.add(symbol)
         clean.append({"symbol": symbol, "company_name": str(item.get("company_name", "")).strip()})
-    return {"version": 1, "stocks": clean, "updated_at": data.get("updated_at")}
+    raw_topics = data.get("topics", [])
+    topics: list[str] = []
+    seen_topics: set[str] = set()
+    if isinstance(raw_topics, list):
+        for value in raw_topics:
+            if not isinstance(value, str):
+                continue
+            try:
+                topic = normalize_topic(value)
+            except ValueError:
+                continue
+            key = topic.casefold()
+            if key not in seen_topics:
+                seen_topics.add(key)
+                topics.append(topic)
+    return {"version": 1, "stocks": clean, "topics": topics, "updated_at": data.get("updated_at")}
 
 
 def add_stock(
@@ -133,6 +157,30 @@ def remove_stock(path: Path, symbol_text: str) -> tuple[bool, str]:
     data["updated_at"] = utc_now_iso()
     write_json_atomic(path, data)
     return True, symbol
+
+
+def add_topic(path: Path, topic_text: str) -> tuple[bool, str]:
+    topic = normalize_topic(topic_text)
+    data = load_watchlist(path)
+    if any(existing.casefold() == topic.casefold() for existing in data["topics"]):
+        return False, topic
+    data["topics"].append(topic)
+    data["topics"].sort(key=str.casefold)
+    data["updated_at"] = utc_now_iso()
+    write_json_atomic(path, data)
+    return True, topic
+
+
+def remove_topic(path: Path, topic_text: str) -> tuple[bool, str]:
+    topic = normalize_topic(topic_text)
+    data = load_watchlist(path)
+    filtered = [existing for existing in data["topics"] if existing.casefold() != topic.casefold()]
+    if len(filtered) == len(data["topics"]):
+        return False, topic
+    data["topics"] = filtered
+    data["updated_at"] = utc_now_iso()
+    write_json_atomic(path, data)
+    return True, topic
 
 
 def load_scan_state(path: Path) -> dict[str, Any]:
