@@ -498,19 +498,20 @@ def run_scan(
             aggregate_status = (
                 "completed" if total_matches else ("no_matches" if total_new_items else "no_new_items")
             )
-            caption, report = make_owner_report(union_articles, article_summaries, all_matches)
-            try:
-                api.send_message(
-                    owner_id,
-                    make_owner_matches_message(union_articles, article_summaries, all_matches),
-                    parse_mode="HTML",
-                )
-            except Exception:
-                logging.exception("Could not send the owner combined matches message")
-            try:
-                api.send_document(owner_id, f"stockpulse-scan-{datetime.now(IST):%Y%m%d-%H%M}.txt", report, "Full scan report attached.")
-            except Exception:
-                logging.exception("Could not send the owner scan report")
+            if union_articles:
+                caption, report = make_owner_report(union_articles, article_summaries, all_matches)
+                try:
+                    api.send_message(
+                        owner_id,
+                        make_owner_matches_message(union_articles, article_summaries, all_matches),
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logging.exception("Could not send the owner combined matches message")
+                try:
+                    api.send_document(owner_id, f"stockpulse-scan-{datetime.now(IST):%Y%m%d-%H%M}.txt", report, "Full scan report attached.")
+                except Exception:
+                    logging.exception("Could not send the owner scan report")
             return {
                 "started_at": started_at,
                 "completed_at": utc_now_iso(),
