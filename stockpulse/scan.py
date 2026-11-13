@@ -6,7 +6,8 @@ import math
 import sys
 import time
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -21,7 +22,7 @@ from .telegram_api import TelegramAPI
 
 IST = ZoneInfo("Asia/Kolkata")
 MAX_TELEGRAM_TEXT = 3800
-SEEN_ITEM_LIMIT = 5000
+SEEN_ITEM_LIMIT = 200
 
 
 def _as_datetime(value: str) -> datetime | None:
@@ -102,6 +103,7 @@ def validate_matches(
                 "title": article.title[:700],
                 "link": article.link,
                 "published_at": article.published_at,
+                "source": article.source,
             }
         )
     return valid
@@ -123,6 +125,9 @@ def make_digest(matches: list[dict[str, str]]) -> list[str]:
         )
         category = html.escape(first.get("category", "news"))
         lines = [f"{labels} · {category}"]
+        title = first.get("title", "").strip()
+        if title and first.get("source", "").casefold() == "business standard":
+            lines.append(f"📰 <b>{html.escape(title[:700])}</b>")
         description = (first.get("description") or first.get("summary", "")).strip()
         if description:
             lines.append(html.escape(description[:1600]))
@@ -130,7 +135,7 @@ def make_digest(matches: list[dict[str, str]]) -> list[str]:
         link = first.get("link", "").strip()
         if link:
             safe_href = html.escape(link, quote=True)
-            metadata += f'    🔗 <a href="{safe_href}">ET Markets</a>'
+            metadata += f'    🔗 <a href="{safe_href}">{html.escape(first.get("source") or "Source")}</a>'
         lines.append(metadata)
         blocks.append("\n\n".join(lines))
     header = f"StockPulseX · {datetime.now(IST).strftime('%d %b %Y · %H:%M')}"
@@ -185,9 +190,13 @@ def make_owner_report(
             + (f" (impact {item['impact_score']:.2f})" if isinstance(item.get("impact_score"), (int, float)) else "")
             for item in article_matches
         ]
+        source_line = f"Source: {article.source or 'Unknown'}"
+        if article.link:
+            source_line += f" — {article.link}"
         lines.extend([
             f"{index}. {article.title or '(untitled article)'}",
             f"Summary: {summaries.get(article.item_id) or article.excerpt or article.title}",
+            source_line,
             f"Matched against: {', '.join(dict.fromkeys(labels)) if labels else 'No monitored match'}",
             "",
         ])
@@ -351,7 +360,11 @@ def run_scan(
                     "matches": 0,
                 }
 
-            items = rss_fetcher(config.et_rss_url, config.http_timeout_seconds)
+            source, feed_url = config.rss_feed
+            items = [
+                replace(item, source=source)
+                for item in rss_fetcher(feed_url, config.http_timeout_seconds)
+            ]
             article_by_id: dict[str, RSSItem] = {}
             union_stocks: dict[str, dict[str, str]] = {}
             union_topics: dict[str, str] = {}
@@ -360,19 +373,6 @@ def run_scan(
                 seen_order = list(dict.fromkeys(state.get("seen_item_ids", [])))
                 seen = set(seen_order)
                 unseen = [item for item in items if item.item_id not in seen]
-                if not state.get("initialized", False):
-                    cutoff = (now or datetime.now(IST)).astimezone(timezone.utc) - timedelta(
-                        hours=config.initial_lookback_hours
-                    )
-                    eligible: list[RSSItem] = []
-                    for item in unseen:
-                        published = _as_datetime(item.published_at)
-                        if published is not None and published >= cutoff:
-                            eligible.append(item)
-                        else:
-                            seen.add(item.item_id)
-                            seen_order.append(item.item_id)
-                    unseen = eligible
                 user["eligible"] = unseen
                 user["seen_order"] = seen_order
                 user["seen"] = seen

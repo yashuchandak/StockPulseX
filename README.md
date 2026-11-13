@@ -1,6 +1,6 @@
 # StockPulseX
 
-NSE stock and topic-based news alerts from the Economic Times Markets RSS feed, delivered to private Telegram chats. The bot is invite-only: the configured owner approves each user from Telegram.
+NSE stock and topic-based news alerts from one configurable news RSS feed, delivered to private Telegram chats. The bot is invite-only: the configured owner approves each user from Telegram.
 
 The Telegram command poller (`python -m stockpulse.commands`) is a continuous long-polling process that stays running and replies to commands promptly. Run it under a service manager such as systemd so it starts on boot and restarts after a failure. The independent scan entry point (`python -m stockpulse.scan`) fetches the RSS feed once, asks Gemini to identify direct matches across approved users' watchlists, and sends each person only their own matches; schedule that scan with cron or a timer.
 
@@ -10,7 +10,7 @@ The Telegram command poller (`python -m stockpulse.commands`) is a continuous lo
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - Your numeric Telegram user ID
 - A Gemini API key and a model enabled for your account
-- A VPS with outbound HTTPS access to Telegram, Google AI, NSE (optional symbol CSV), and Economic Times
+- A VPS with outbound HTTPS access to Telegram, Google AI, NSE (optional symbol CSV), and the selected news source
 
 ## Setup
 
@@ -26,6 +26,8 @@ Edit `.env` and set `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY`. Start a private c
 ```bash
 .venv/bin/python -m stockpulse.identify_owner
 ```
+
+Set `RSS_SOURCE` to `business_standard` or `economic_times` to select exactly one feed. It defaults to `business_standard`. Override the selected feed URL with `BUSINESS_STANDARD_RSS_URL` or `ET_RSS_URL` if needed.
 
 Copy the printed `TELEGRAM_OWNER_ID` into `.env`. This helper does not advance Telegram's update offset, so the command poller can still process that `/start` update.
 
@@ -68,19 +70,18 @@ Approved users can use `/add`, `/remove`, `/follow`, `/unfollow`, `/topics`, `/l
 
 ### News processing flow
 
-1. Each scheduled scan fetches the configured Economic Times Markets RSS feed once and keeps only unseen, eligible articles.
+1. Each scheduled scan fetches the single feed selected by `RSS_SOURCE` and keeps only unseen, eligible articles.
 2. It combines approved users' current stock symbols and followed topics into one Gemini request. The prompt asks Gemini for direct company matches and substantive topic coverage (including clear related terms such as bullion for gold or military procurement for defense), while rejecting passing mentions and unsupported claims.
 3. The program verifies that every match refers to an actual subscribed symbol or topic and that its evidence phrase appears in the RSS title or excerpt.
 4. Each user receives only matches for their own current subscriptions. Topic matches appear in the digest labeled `Topic: gold`; stock matches keep their symbol labels. No relevant match means no digest message.
 5. The scan records pending digests before Telegram delivery so a failed send can be retried on a later scan.
 6. The owner receives one combined matching-results message, followed by one `.txt` report attachment listing eligible RSS articles, one-sentence summaries, matched subscriptions, and source links. The owner does not receive a separate personal digest. The report has no “top stories” section.
 
-Topic relevance is limited to the configured RSS source and its titles/excerpts; this does not search the whole web or fetch full articles.
+Topic relevance is limited to the selected RSS feed and its titles/excerpts; this does not search the whole web or fetch full articles.
 
 ## Scan behavior
 
-- First successful scan considers feed items from the preceding 18 hours (configurable with `INITIAL_LOOKBACK_HOURS`) and ignores older backlog.
-- Later scans process unseen RSS items. An item ID is based on its feed GUID, canonical link, or a hash fallback.
+- First successful scan reviews every item currently present in the selected RSS feed, regardless of publication time. Later scans process unseen RSS items. The scanner keeps the most recent 200 seen item IDs to avoid duplicate processing if the feed reorders or backfills stories. An item ID is based on its feed GUID, canonical link, or a hash fallback.
 - Gemini receives only RSS titles/excerpts, subscribed symbols, and followed topics. It must provide an exact evidence phrase from the item; the app suppresses uncertain matches, unknown symbols/topics, unsupported evidence, and summaries without evidence.
 - One digest is sent per scan, with source links and short neutral summaries. No match means no digest message; `/status` still shows the scan result.
 - The app does not scrape full articles, fetch stock prices, or provide buy/sell recommendations.

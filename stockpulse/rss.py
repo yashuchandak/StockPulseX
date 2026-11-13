@@ -78,6 +78,7 @@ class RSSItem:
     excerpt: str
     link: str
     published_at: str
+    source: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -86,6 +87,7 @@ class RSSItem:
             "excerpt": self.excerpt,
             "link": self.link,
             "published_at": self.published_at,
+            "source": self.source,
         }
 
 
@@ -130,5 +132,5 @@ def fetch_rss(url: str, timeout_seconds: int = 30) -> list[RSSItem]:
         with urlopen(request, timeout=timeout_seconds) as response:
             return parse_rss(response.read())
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
-        raise RSSFetchError(f"Could not fetch the Economic Times RSS feed: {exc}") from exc
+        raise RSSFetchError(f"Could not fetch RSS feed {url}: {exc}") from exc
 

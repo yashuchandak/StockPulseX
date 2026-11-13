@@ -31,13 +31,14 @@ class Config:
     scan_state_path: Path
     telegram_state_path: Path
     nse_symbols_path: Path
+    rss_source: str
     et_rss_url: str
+    business_standard_rss_url: str
     telegram_bot_token: str
     telegram_owner_id: int | None
     gemini_api_key: str
     gemini_model: str
     telegram_getupdates_timeout: int
-    initial_lookback_hours: int
     http_timeout_seconds: int
 
     @classmethod
@@ -53,6 +54,9 @@ class Config:
             owner_id = int(owner_text) if owner_text else None
         except ValueError as exc:
             raise ValueError("TELEGRAM_OWNER_ID must be a numeric Telegram user ID") from exc
+        rss_source = os.getenv("RSS_SOURCE", "business_standard").strip().lower()
+        if rss_source not in {"economic_times", "business_standard"}:
+            raise ValueError("RSS_SOURCE must be 'economic_times' or 'business_standard'")
         return cls(
             project_root=root,
             data_dir=data_dir,
@@ -60,16 +64,20 @@ class Config:
             scan_state_path=data_dir / "scan_state.json",
             telegram_state_path=data_dir / "telegram_state.json",
             nse_symbols_path=symbols_path,
+            rss_source=rss_source,
             et_rss_url=os.getenv(
                 "ET_RSS_URL",
                 "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+            ),
+            business_standard_rss_url=os.getenv(
+                "BUSINESS_STANDARD_RSS_URL",
+                "https://www.business-standard.com/rss/markets-106.rss",
             ),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_owner_id=owner_id,
             gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip(),
             telegram_getupdates_timeout=max(1, min(50, int(os.getenv("TELEGRAM_GETUPDATES_TIMEOUT", "50")))),
-            initial_lookback_hours=max(1, int(os.getenv("INITIAL_LOOKBACK_HOURS", "18"))),
             http_timeout_seconds=max(5, int(os.getenv("HTTP_TIMEOUT_SECONDS", "30"))),
         )
 
@@ -92,6 +100,12 @@ class Config:
         if user_id == self.telegram_owner_id:
             return self.watchlist_path
         return self.data_dir / "users" / str(user_id) / "watchlist.json"
+
+    @property
+    def rss_feed(self) -> tuple[str, str]:
+        if self.rss_source == "economic_times":
+            return ("Economic Times", self.et_rss_url)
+        return ("Business Standard", self.business_standard_rss_url)
 
     def scan_state_path_for_user(self, user_id: int) -> Path:
         if user_id == self.telegram_owner_id:
